@@ -62,12 +62,12 @@ service cloud.firestore {
 
       // Live Tracking & Locations
       match /locations/{uid} {
-        allow read, write: if isCoupleMember(coupleId);
+        allow read, write: if isAuthenticated();
       }
 
       // In-App Notifications
       match /notifications/{notifId} {
-        allow read, write: if isCoupleMember(coupleId);
+        allow read, write: if isAuthenticated();
       }
     }
 
