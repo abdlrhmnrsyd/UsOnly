@@ -224,9 +224,32 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           // Messages Stream
           Expanded(
             child: StreamBuilder<List<MessageModel>>(
+              initialData: const <MessageModel>[],
               stream: ref.watch(chatRepositoryProvider).watchMessages(convId),
               builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
+                if (snapshot.hasError) {
+                  return Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.favorite_border_rounded,
+                          size: 48,
+                          color: AppColors.primary.withValues(alpha: 0.4),
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Mulai obrolan manis kalian 💕',
+                          style: TextStyle(
+                            color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+                if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
                   return const Center(child: CircularProgressIndicator());
                 }
 

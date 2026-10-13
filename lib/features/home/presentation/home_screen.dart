@@ -608,41 +608,47 @@ class HomeScreen extends ConsumerWidget {
                 value: isLiveActive,
                 activeTrackColor: AppColors.success,
                 onChanged: (enable) async {
-                  if (enable) {
-                    await locationRepo.startLiveSharing(
-                      coupleId: coupleId,
-                      uid: user.uid,
-                      displayName: user.displayName,
-                      photoUrl: user.photoUrl,
-                    );
-                    await ref.read(notificationsRepositoryProvider).sendNotification(
-                          coupleId: coupleId,
-                          senderUid: user.uid,
-                          senderName: user.displayName,
-                          title: '📍 ${user.displayName} menyalakan Live Location!',
-                          body: 'Posisi doi sekarang terpantau langsung di Radar.',
-                          type: 'location',
+                  try {
+                    if (enable) {
+                      await locationRepo.startLiveSharing(
+                        coupleId: coupleId,
+                        uid: user.uid,
+                        displayName: user.displayName,
+                        photoUrl: user.photoUrl,
+                      );
+                      try {
+                        await ref.read(notificationsRepositoryProvider).sendNotification(
+                              coupleId: coupleId,
+                              senderUid: user.uid,
+                              senderName: user.displayName,
+                              title: '📍 ${user.displayName} menyalakan Live Location!',
+                              body: 'Posisi doi sekarang terpantau langsung di Radar.',
+                              type: 'location',
+                            );
+                      } catch (_) {}
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('🟢 Live Location Aktif! Posisi otomatis terkirim secara realtime.'),
+                            backgroundColor: AppColors.success,
+                          ),
                         );
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('🟢 Live Location Aktif! Posisi otomatis terkirim secara realtime.'),
-                          backgroundColor: AppColors.success,
-                        ),
+                      }
+                    } else {
+                      await locationRepo.stopLiveSharing(
+                        coupleId: coupleId,
+                        uid: user.uid,
                       );
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('⚪ Live Location Dimatikan.'),
+                          ),
+                        );
+                      }
                     }
-                  } else {
-                    await locationRepo.stopLiveSharing(
-                      coupleId: coupleId,
-                      uid: user.uid,
-                    );
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('⚪ Live Location Dimatikan.'),
-                        ),
-                      );
-                    }
+                  } catch (e) {
+                    debugPrint('Error toggling live location on home: $e');
                   }
                 },
               ),
