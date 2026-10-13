@@ -352,6 +352,9 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
                       userAgentPackageName: 'com.usonly.app',
                       subdomains: _selectedMapStyle.subdomains,
                       maxZoom: 20,
+                      errorTileCallback: (tile, error, stackTrace) {
+                        debugPrint('MAP_TILE_ERROR: ${tile.coordinates} -> $error');
+                      },
                     ),
 
                     // Accuracy & Radar Range Circles
