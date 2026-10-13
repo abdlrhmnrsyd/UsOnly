@@ -15,13 +15,41 @@ import '../data/location_repository.dart';
 import '../domain/location_model.dart';
 
 enum MapStyleType {
-  osm('OpenStreetMap (Standard)', 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'),
-  voyager('Google Clean Style', 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png'),
-  dark('Night Mode (Dark)', 'https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}@2x.png');
+  googleRoadmap(
+    'Google Maps (Jalan)',
+    'https://mt{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}',
+    ['0', '1', '2', '3'],
+  ),
+  googleSatellite(
+    'Google Maps (Satelit)',
+    'https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+    ['0', '1', '2', '3'],
+  ),
+  googleTerrain(
+    'Google Maps (Medan)',
+    'https://mt{s}.google.com/vt/lyrs=p&x={x}&y={y}&z={z}',
+    ['0', '1', '2', '3'],
+  ),
+  cartoVoyager(
+    'Carto Clean Style',
+    'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
+    ['a', 'b', 'c', 'd'],
+  ),
+  cartoDark(
+    'Find Hub (Mode Gelap)',
+    'https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}.png',
+    ['a', 'b', 'c', 'd'],
+  ),
+  osm(
+    'OpenStreetMap',
+    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    [],
+  );
 
   final String label;
   final String urlTemplate;
-  const MapStyleType(this.label, this.urlTemplate);
+  final List<String> subdomains;
+  const MapStyleType(this.label, this.urlTemplate, this.subdomains);
 }
 
 class LocationTrackingScreen extends ConsumerStatefulWidget {
@@ -35,7 +63,7 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
     with TickerProviderStateMixin {
   late final MapController _mapController;
   late final AnimationController _pulseController;
-  MapStyleType _selectedMapStyle = MapStyleType.osm;
+  MapStyleType _selectedMapStyle = MapStyleType.googleRoadmap;
 
   String _selectedStatus = 'Di Rumah 🏡';
   bool _isPanelExpanded = true;
@@ -269,13 +297,15 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
           final partnerBattery = partnerLoc?.batteryLevel ?? 88;
           final partnerPlace = partnerLoc?.placeLabel ?? 'Di Rumah 🏡';
 
-          // Distance calculation
+          // Distance calculation & estimated travel time
           final distanceMeters = const Distance().as(LengthUnit.Meter, myLatLng, partnerLatLng);
           final String distanceString = distanceMeters < 50
               ? 'Kalian sedang bersama 💕'
               : distanceMeters < 1000
                   ? '${distanceMeters.round()} m dari kamu'
                   : '${(distanceMeters / 1000).toStringAsFixed(1)} km dari kamu';
+          final int carMinutes = (distanceMeters / 450).ceil().clamp(1, 999);
+          final int walkMinutes = (distanceMeters / 75).ceil().clamp(1, 999);
 
           // Auto-center camera when a new coordinate arrives or on initial load
           if (_lastAutoCenteredPoint == null ||
@@ -320,10 +350,8 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
                     TileLayer(
                       urlTemplate: _selectedMapStyle.urlTemplate,
                       userAgentPackageName: 'com.usonly.app',
-                      subdomains: _selectedMapStyle.urlTemplate.contains('{s}')
-                          ? const ['a', 'b', 'c', 'd']
-                          : const [],
-                      maxZoom: 19,
+                      subdomains: _selectedMapStyle.subdomains,
+                      maxZoom: 20,
                     ),
 
                     // Accuracy & Radar Range Circles
@@ -575,32 +603,52 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
                           },
                           itemBuilder: (context) => [
                             const PopupMenuItem(
-                              value: MapStyleType.voyager,
+                              value: MapStyleType.googleRoadmap,
                               child: Row(
                                 children: [
-                                  Icon(Icons.map_rounded, size: 18, color: AppColors.primary),
+                                  Icon(Icons.map_rounded, size: 18, color: Color(0xFF4285F4)),
                                   SizedBox(width: 10),
-                                  Text('Google Clean (Default)'),
+                                  Text('Google Maps (Jalan)'),
                                 ],
                               ),
                             ),
                             const PopupMenuItem(
-                              value: MapStyleType.dark,
+                              value: MapStyleType.googleSatellite,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.satellite_alt_rounded, size: 18, color: Color(0xFF34A853)),
+                                  SizedBox(width: 10),
+                                  Text('Google Maps (Satelit)'),
+                                ],
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              value: MapStyleType.googleTerrain,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.terrain_rounded, size: 18, color: Color(0xFFFBBC05)),
+                                  SizedBox(width: 10),
+                                  Text('Google Maps (Medan)'),
+                                ],
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              value: MapStyleType.cartoDark,
                               child: Row(
                                 children: [
                                   Icon(Icons.dark_mode_rounded, size: 18, color: Colors.indigoAccent),
                                   SizedBox(width: 10),
-                                  Text('Night Mode (Dark)'),
+                                  Text('Find Hub (Mode Gelap)'),
                                 ],
                               ),
                             ),
                             const PopupMenuItem(
-                              value: MapStyleType.osm,
+                              value: MapStyleType.cartoVoyager,
                               child: Row(
                                 children: [
-                                  Icon(Icons.public_rounded, size: 18, color: Colors.teal),
+                                  Icon(Icons.wb_sunny_rounded, size: 18, color: AppColors.primary),
                                   SizedBox(width: 10),
-                                  Text('OpenStreetMap'),
+                                  Text('Carto Clean'),
                                 ],
                               ),
                             ),
@@ -612,12 +660,24 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
                 ),
               ),
 
-              // 3. FLOATING MAP ACTION BUTTONS (Right Side Google Maps Style)
-              Positioned(
+              // 3. FLOATING MAP ACTION BUTTONS (Right Side Google Maps Style, floats right above bottom sheet)
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeOutCubic,
                 right: 16,
-                top: 120,
+                bottom: _isPanelExpanded ? 340 : 120,
                 child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
+                    // Fit Both (Lihat Berdua)
+                    _buildFloatingMapButton(
+                      icon: Icons.zoom_out_map_rounded,
+                      iconColor: isDark ? Colors.white : Colors.black87,
+                      tooltip: 'Lihat Berdua di Peta',
+                      onTap: () => _fitBothLocations(myLatLng, partnerLatLng),
+                    ),
+                    const SizedBox(height: 8),
+
                     // Recenter to Partner (Focus Doi)
                     _buildFloatingMapButton(
                       icon: Icons.favorite_rounded,
@@ -625,7 +685,7 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
                       tooltip: 'Fokus ke Doi',
                       onTap: () => _centerOnLocation(partnerLatLng, zoom: 16.5),
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: 8),
 
                     // Recenter to Me (Focus Kamu)
                     _buildFloatingMapButton(
@@ -634,40 +694,54 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
                       tooltip: 'Fokus ke Saya',
                       onTap: () => _centerOnLocation(myLatLng, zoom: 16.5),
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: 8),
 
-                    // Fit Both (Lihat Berdua)
-                    _buildFloatingMapButton(
-                      icon: Icons.zoom_out_map_rounded,
-                      iconColor: isDark ? Colors.white : Colors.black87,
-                      tooltip: 'Lihat Berdua di Peta',
-                      onTap: () => _fitBothLocations(myLatLng, partnerLatLng),
-                    ),
-                    const SizedBox(height: 16),
-
-                    // Zoom In
-                    _buildFloatingMapButton(
-                      icon: Icons.add_rounded,
-                      tooltip: 'Perbesar',
-                      mini: true,
-                      onTap: () {
-                        try {
-                          _mapController.move(_mapController.camera.center, _mapController.camera.zoom + 1);
-                        } catch (_) {}
-                      },
-                    ),
-                    const SizedBox(height: 6),
-
-                    // Zoom Out
-                    _buildFloatingMapButton(
-                      icon: Icons.remove_rounded,
-                      tooltip: 'Perkecil',
-                      mini: true,
-                      onTap: () {
-                        try {
-                          _mapController.move(_mapController.camera.center, _mapController.camera.zoom - 1);
-                        } catch (_) {}
-                      },
+                    // Zoom In & Out Connected Pill
+                    Container(
+                      decoration: BoxDecoration(
+                        color: (isDark ? AppColors.surfaceDark : Colors.white).withValues(alpha: 0.95),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: isDark ? Colors.white12 : Colors.black.withValues(alpha: 0.08),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.15),
+                            blurRadius: 10,
+                            offset: const Offset(0, 3),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          InkWell(
+                            onTap: () {
+                              try {
+                                _mapController.move(_mapController.camera.center, _mapController.camera.zoom + 1);
+                              } catch (_) {}
+                            },
+                            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                              child: Icon(Icons.add_rounded, size: 20),
+                            ),
+                          ),
+                          Container(width: 22, height: 1, color: isDark ? Colors.white12 : Colors.black12),
+                          InkWell(
+                            onTap: () {
+                              try {
+                                _mapController.move(_mapController.camera.center, _mapController.camera.zoom - 1);
+                              } catch (_) {}
+                            },
+                            borderRadius: const BorderRadius.vertical(bottom: Radius.circular(16)),
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                              child: Icon(Icons.remove_rounded, size: 20),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
@@ -795,6 +869,43 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
                                           color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
                                         ),
                                       ),
+                                      const SizedBox(height: 3),
+                                      Wrap(
+                                        spacing: 6,
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                                            decoration: BoxDecoration(
+                                              color: (isDark ? Colors.white12 : Colors.black.withValues(alpha: 0.05)),
+                                              borderRadius: BorderRadius.circular(6),
+                                            ),
+                                            child: Text(
+                                              '🚗 ~$carMinutes mnt',
+                                              style: TextStyle(
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.w600,
+                                                color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
+                                              ),
+                                            ),
+                                          ),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                                            decoration: BoxDecoration(
+                                              color: (isDark ? Colors.white12 : Colors.black.withValues(alpha: 0.05)),
+                                              borderRadius: BorderRadius.circular(6),
+                                            ),
+                                            child: Text(
+                                              '🚶 ~$walkMinutes mnt',
+                                              style: TextStyle(
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.w600,
+                                                color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 2),
                                       Text(
                                         isPartnerLive
                                             ? '🟢 Sedang berbagi live lokasi realtime'
