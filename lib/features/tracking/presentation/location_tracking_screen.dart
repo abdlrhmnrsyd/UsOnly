@@ -39,7 +39,7 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
 
   String _selectedStatus = 'Di Rumah 🏡';
   bool _isPanelExpanded = true;
-  bool _hasInitialCentered = false;
+  LatLng? _lastAutoCenteredPoint;
 
   final List<String> _statusOptions = [
     'Di Rumah 🏡',
@@ -213,16 +213,16 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
 
   void _fitBothLocations(LatLng p1, LatLng p2) {
     try {
-      final bounds = LatLngBounds(p1, p2);
+      final bounds = LatLngBounds.fromPoints([p1, p2]);
       _mapController.fitCamera(
         CameraFit.bounds(
           bounds: bounds,
-          padding: const EdgeInsets.symmetric(horizontal: 60, vertical: 120),
-          maxZoom: 17.0,
+          padding: const EdgeInsets.only(left: 60, right: 60, top: 120, bottom: 280),
+          maxZoom: 16.5,
         ),
       );
-    } catch (e) {
-      _centerOnLocation(p2);
+    } catch (_) {
+      _centerOnLocation(p1);
     }
   }
 
@@ -277,9 +277,11 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
                   ? '${distanceMeters.round()} m dari kamu'
                   : '${(distanceMeters / 1000).toStringAsFixed(1)} km dari kamu';
 
-          // Auto-center camera on first load
-          if (!_hasInitialCentered) {
-            _hasInitialCentered = true;
+          // Auto-center camera when a new coordinate arrives or on initial load
+          if (_lastAutoCenteredPoint == null ||
+              (_lastAutoCenteredPoint!.latitude - myLatLng.latitude).abs() > 0.005 ||
+              (_lastAutoCenteredPoint!.longitude - myLatLng.longitude).abs() > 0.005) {
+            _lastAutoCenteredPoint = myLatLng;
             WidgetsBinding.instance.addPostFrameCallback((_) {
               _fitBothLocations(myLatLng, partnerLatLng);
             });
@@ -293,6 +295,13 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
 
           return Stack(
             children: [
+              // 0. MAP VECTOR CANVAS (Realistic Google Maps Terrain & Road Network)
+              Positioned.fill(
+                child: CustomPaint(
+                  painter: GoogleMapsCanvasPainter(isDark: isDark),
+                ),
+              ),
+
               // 1. FULLSCREEN INTERACTIVE MAP (Google Maps / Find Hub Style)
               Positioned.fill(
                 child: FlutterMap(
@@ -1254,4 +1263,83 @@ class _PinTrianglePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _PinTrianglePainter oldDelegate) => oldDelegate.color != color;
+}
+
+class GoogleMapsCanvasPainter extends CustomPainter {
+  final bool isDark;
+  GoogleMapsCanvasPainter({required this.isDark});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // 1. Terrain Base Background
+    final bgPaint = Paint()..color = isDark ? const Color(0xFF1E242B) : const Color(0xFFF2EFE9);
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height), bgPaint);
+
+    // 2. City Water Body (Curved river / lake bay)
+    final waterPaint = Paint()..color = isDark ? const Color(0xFF162D3D) : const Color(0xFFAADAFF);
+    final riverPath = Path()
+      ..moveTo(-20, size.height * 0.35)
+      ..cubicTo(size.width * 0.3, size.height * 0.28, size.width * 0.6, size.height * 0.55, size.width + 20, size.height * 0.48)
+      ..lineTo(size.width + 20, size.height * 0.56)
+      ..cubicTo(size.width * 0.6, size.height * 0.63, size.width * 0.3, size.height * 0.36, -20, size.height * 0.43)
+      ..close();
+    canvas.drawPath(riverPath, waterPaint);
+
+    // 3. Green Park Zones (Urban nature parks)
+    final parkPaint = Paint()..color = isDark ? const Color(0xFF223528) : const Color(0xFFD5E8D4);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(Rect.fromLTWH(size.width * 0.08, size.height * 0.12, 140, 90), const Radius.circular(16)),
+      parkPaint,
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(Rect.fromLTWH(size.width * 0.62, size.height * 0.68, 120, 80), const Radius.circular(16)),
+      parkPaint,
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(Rect.fromLTWH(size.width * 0.55, size.height * 0.18, 90, 70), const Radius.circular(14)),
+      parkPaint,
+    );
+
+    // 4. City Street Grid Network (Google Maps Arterial & Secondary Roads)
+    final secondaryRoadPaint = Paint()
+      ..color = (isDark ? Colors.white12 : Colors.white)
+      ..strokeWidth = 3.5
+      ..style = PaintingStyle.stroke;
+
+    final roadBorderPaint = Paint()
+      ..color = (isDark ? Colors.white.withValues(alpha: 0.04) : const Color(0xFFDCD8CF))
+      ..strokeWidth = 5.5
+      ..style = PaintingStyle.stroke;
+
+    final arterialRoadPaint = Paint()
+      ..color = (isDark ? const Color(0xFF384350) : const Color(0xFFFFF7D6))
+      ..strokeWidth = 6.0
+      ..style = PaintingStyle.stroke;
+
+    final arterialBorderPaint = Paint()
+      ..color = (isDark ? Colors.white24 : const Color(0xFFE8DEB5))
+      ..strokeWidth = 8.5
+      ..style = PaintingStyle.stroke;
+
+    // Draw secondary grid streets
+    for (double y = 60; y < size.height; y += 75) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), roadBorderPaint);
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), secondaryRoadPaint);
+    }
+    for (double x = 40; x < size.width; x += 85) {
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), roadBorderPaint);
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), secondaryRoadPaint);
+    }
+
+    // Draw primary diagonal & cross highways
+    final highway1 = Path()..moveTo(0, size.height * 0.25)..lineTo(size.width, size.height * 0.75);
+    final highway2 = Path()..moveTo(size.width * 0.45, 0)..lineTo(size.width * 0.52, size.height);
+    canvas.drawPath(highway1, arterialBorderPaint);
+    canvas.drawPath(highway1, arterialRoadPaint);
+    canvas.drawPath(highway2, arterialBorderPaint);
+    canvas.drawPath(highway2, arterialRoadPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant GoogleMapsCanvasPainter oldDelegate) => oldDelegate.isDark != isDark;
 }
