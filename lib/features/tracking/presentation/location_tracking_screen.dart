@@ -341,6 +341,7 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
                     initialZoom: 15.0,
                     minZoom: 3.0,
                     maxZoom: 19.0,
+                    backgroundColor: Colors.transparent,
                     interactionOptions: const InteractionOptions(
                       flags: InteractiveFlag.all,
                     ),
