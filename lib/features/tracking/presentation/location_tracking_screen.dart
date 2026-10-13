@@ -1,8 +1,11 @@
-import 'dart:math' as math;
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:latlong2/latlong.dart' hide Path;
+import 'package:url_launcher/url_launcher.dart';
 import '../../../app/theme/app_colors.dart';
 import '../../auth/domain/auth_state.dart';
 import '../../chat/presentation/chat_screen.dart';
@@ -10,6 +13,16 @@ import '../../media/presentation/app_image_view.dart';
 import '../../notifications/data/notifications_repository.dart';
 import '../data/location_repository.dart';
 import '../domain/location_model.dart';
+
+enum MapStyleType {
+  osm('OpenStreetMap (Standard)', 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'),
+  voyager('Google Clean Style', 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png'),
+  dark('Night Mode (Dark)', 'https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}@2x.png');
+
+  final String label;
+  final String urlTemplate;
+  const MapStyleType(this.label, this.urlTemplate);
+}
 
 class LocationTrackingScreen extends ConsumerStatefulWidget {
   const LocationTrackingScreen({super.key});
@@ -19,9 +32,14 @@ class LocationTrackingScreen extends ConsumerStatefulWidget {
 }
 
 class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _radarController;
+    with TickerProviderStateMixin {
+  late final MapController _mapController;
+  late final AnimationController _pulseController;
+  MapStyleType _selectedMapStyle = MapStyleType.osm;
+
   String _selectedStatus = 'Di Rumah 🏡';
+  bool _isPanelExpanded = true;
+  bool _hasInitialCentered = false;
 
   final List<String> _statusOptions = [
     'Di Rumah 🏡',
@@ -35,15 +53,17 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
   @override
   void initState() {
     super.initState();
-    _radarController = AnimationController(
+    _mapController = MapController();
+    _pulseController = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 3),
+      duration: const Duration(seconds: 2),
     )..repeat();
   }
 
   @override
   void dispose() {
-    _radarController.dispose();
+    _mapController.dispose();
+    _pulseController.dispose();
     super.dispose();
   }
 
@@ -70,7 +90,7 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
                 senderUid: user.uid,
                 senderName: user.displayName,
                 title: '📍 ${user.displayName} menyalakan Live Location!',
-                body: 'Kamu sekarang bisa melihat pergerakannya secara langsung di Radar.',
+                body: 'Buka Find Hub untuk melihat pergerakannya secara realtime di peta.',
                 type: 'location',
               );
         } catch (_) {}
@@ -80,6 +100,7 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
             const SnackBar(
               content: Text('🟢 Live Location Aktif! Posisi otomatis terkirim.'),
               backgroundColor: AppColors.success,
+              behavior: SnackBarBehavior.floating,
             ),
           );
         }
@@ -93,6 +114,7 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text('⚪ Live Location Dimatikan.'),
+              behavior: SnackBarBehavior.floating,
             ),
           );
         }
@@ -101,6 +123,26 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
       debugPrint('Error toggling live location: $e');
     }
     if (mounted) setState(() {});
+  }
+
+  Future<void> _openNavigation(double lat, double lng) async {
+    final uri = Uri.parse('https://www.google.com/maps/dir/?api=1&destination=$lat,$lng');
+    try {
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } else {
+        await launchUrl(uri);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Tidak dapat membuka Google Maps: $e'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _shareToChat(LocationModel myLoc) async {
@@ -119,7 +161,10 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Lokasi dibagikan ke Chat! 💬')),
+          const SnackBar(
+            content: Text('Lokasi dibagikan ke Chat! 💬'),
+            behavior: SnackBarBehavior.floating,
+          ),
         );
         context.go('/chat');
       }
@@ -144,14 +189,40 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
           senderUid: user.uid,
           senderName: user.displayName,
           title: '📍 Nyalakan Live Location dong!',
-          body: '${user.displayName} ingin saling tracking denganmu.',
+          body: '${user.displayName} ingin melihat lokasimu di Find Hub.',
           type: 'location',
         );
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Permintaan live location dikirim ke pasangan! 🔔')),
+        const SnackBar(
+          content: Text('Permintaan live location dikirim ke pasangan! 🔔'),
+          behavior: SnackBarBehavior.floating,
+        ),
       );
+    }
+  }
+
+  void _centerOnLocation(LatLng point, {double zoom = 16.0}) {
+    try {
+      _mapController.move(point, zoom);
+    } catch (e) {
+      debugPrint('Map move error: $e');
+    }
+  }
+
+  void _fitBothLocations(LatLng p1, LatLng p2) {
+    try {
+      final bounds = LatLngBounds(p1, p2);
+      _mapController.fitCamera(
+        CameraFit.bounds(
+          bounds: bounds,
+          padding: const EdgeInsets.symmetric(horizontal: 60, vertical: 120),
+          maxZoom: 17.0,
+        ),
+      );
+    } catch (e) {
+      _centerOnLocation(p2);
     }
   }
 
@@ -172,17 +243,6 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
 
     return Scaffold(
       backgroundColor: isDark ? AppColors.backgroundDark : AppColors.backgroundLight,
-      appBar: AppBar(
-        title: const Text('Couple Radar & Live Tracking'),
-        backgroundColor: Colors.transparent,
-        actions: [
-          IconButton(
-            tooltip: 'Ping Doi',
-            icon: const Icon(Icons.notifications_active_outlined),
-            onPressed: _pingPartnerForLocation,
-          ),
-        ],
-      ),
       body: StreamBuilder<Map<String, LocationModel>>(
         stream: repo.watchCoupleLocations(coupleId),
         builder: (context, snapshot) {
@@ -194,465 +254,897 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
           final isMyLiveActive = (myLoc?.isLive == true) || repo.isLiveSharing;
           final isPartnerLive = partnerLoc?.isLive ?? false;
 
-          return SingleChildScrollView(
-            child: Column(
-              children: [
-                // MASTER LIVE LOCATION SWITCH CARD
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                  child: Container(
-                    padding: const EdgeInsets.all(18),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: isMyLiveActive
-                            ? [
-                                const Color(0xFF1B4931),
-                                isDark ? AppColors.surfaceDark : const Color(0xFFE8F7EE)
-                              ]
-                            : [
-                                isDark ? AppColors.surfaceDark : AppColors.surfaceLight,
-                                isDark ? AppColors.surfaceSubtleDark : AppColors.surfaceSubtleLight
-                              ],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      ),
-                      borderRadius: BorderRadius.circular(24),
-                      border: Border.all(
-                        color: isMyLiveActive
-                            ? AppColors.success
-                            : (isDark ? AppColors.dividerDark : AppColors.dividerLight),
-                        width: isMyLiveActive ? 2 : 1,
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: (isMyLiveActive ? AppColors.success : Colors.black)
-                              .withValues(alpha: isMyLiveActive ? 0.2 : 0.05),
-                          blurRadius: 16,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: isMyLiveActive
-                                ? AppColors.success.withValues(alpha: 0.2)
-                                : (isDark ? Colors.white12 : Colors.black12),
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(
-                            isMyLiveActive ? Icons.sensors_rounded : Icons.sensors_off_rounded,
-                            color: isMyLiveActive ? AppColors.success : Colors.grey,
-                            size: 26,
-                          ),
-                        ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Text(
-                                    'Live Location Sharing',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 15,
-                                      color: isDark ? AppColors.textPrimaryDark : AppColors.textPrimaryLight,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 6),
-                                  if (isMyLiveActive)
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                      decoration: BoxDecoration(
-                                        color: AppColors.success,
-                                        borderRadius: BorderRadius.circular(10),
-                                      ),
-                                      child: const Text(
-                                        'LIVE',
-                                        style: TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 9,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                    ),
-                                ],
-                              ),
-                              const SizedBox(height: 3),
-                              Text(
-                                isMyLiveActive
-                                    ? 'Posisi terkirim otomatis secara realtime'
-                                    : 'Nyalakan untuk saling tracking otomatis',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        Switch.adaptive(
-                          value: isMyLiveActive,
-                          activeTrackColor: AppColors.success,
-                          onChanged: (val) => _toggleLiveSharing(val),
-                        ),
-                      ],
+          // LatLng coords with sensible fallbacks
+          final myLatLng = (myLoc != null && myLoc.latitude != 0.0 && myLoc.longitude != 0.0)
+              ? LatLng(myLoc.latitude, myLoc.longitude)
+              : const LatLng(-6.2088, 106.8456); // Jakarta Pusat fallback
+
+          // If partner has no location yet, create a simulated nearby demonstration point
+          final partnerLatLng = (partnerLoc != null && partnerLoc.latitude != 0.0 && partnerLoc.longitude != 0.0)
+              ? LatLng(partnerLoc.latitude, partnerLoc.longitude)
+              : LatLng(myLatLng.latitude + 0.0055, myLatLng.longitude + 0.0072); // ~900m away
+
+          final partnerDisplayName = partnerLoc?.displayName ?? 'Pasangan Kamu';
+          final partnerPhotoUrl = partnerLoc?.photoUrl;
+          final partnerBattery = partnerLoc?.batteryLevel ?? 88;
+          final partnerPlace = partnerLoc?.placeLabel ?? 'Di Rumah 🏡';
+
+          // Distance calculation
+          final distanceMeters = const Distance().as(LengthUnit.Meter, myLatLng, partnerLatLng);
+          final String distanceString = distanceMeters < 50
+              ? 'Kalian sedang bersama 💕'
+              : distanceMeters < 1000
+                  ? '${distanceMeters.round()} m dari kamu'
+                  : '${(distanceMeters / 1000).toStringAsFixed(1)} km dari kamu';
+
+          // Auto-center camera on first load
+          if (!_hasInitialCentered) {
+            _hasInitialCentered = true;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _fitBothLocations(myLatLng, partnerLatLng);
+            });
+          }
+
+          // Midpoint for distance pill badge
+          final midPoint = LatLng(
+            (myLatLng.latitude + partnerLatLng.latitude) / 2,
+            (myLatLng.longitude + partnerLatLng.longitude) / 2,
+          );
+
+          return Stack(
+            children: [
+              // 1. FULLSCREEN INTERACTIVE MAP (Google Maps / Find Hub Style)
+              Positioned.fill(
+                child: FlutterMap(
+                  mapController: _mapController,
+                  options: MapOptions(
+                    initialCenter: myLatLng,
+                    initialZoom: 15.0,
+                    minZoom: 3.0,
+                    maxZoom: 19.0,
+                    interactionOptions: const InteractionOptions(
+                      flags: InteractiveFlag.all,
                     ),
                   ),
-                ),
+                  children: [
+                    // Dynamic Map Tile Provider (OSM / Voyager / Dark)
+                    TileLayer(
+                      urlTemplate: _selectedMapStyle.urlTemplate,
+                      userAgentPackageName: 'com.usonly.app',
+                      subdomains: _selectedMapStyle.urlTemplate.contains('{s}')
+                          ? const ['a', 'b', 'c', 'd']
+                          : const [],
+                      maxZoom: 19,
+                    ),
 
-                // Visual Couple Radar Canvas
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
-                  child: Container(
-                    height: 290,
-                    width: double.infinity,
-                    decoration: BoxDecoration(
-                      color: isDark ? AppColors.surfaceDark : AppColors.surfaceLight,
-                      borderRadius: BorderRadius.circular(28),
-                      border: Border.all(
-                        color: AppColors.primary.withValues(alpha: 0.2),
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: AppColors.primary.withValues(alpha: 0.08),
-                          blurRadius: 20,
-                          offset: const Offset(0, 8),
+                    // Accuracy & Radar Range Circles
+                    CircleLayer(
+                      circles: [
+                        // User accuracy halo
+                        CircleMarker(
+                          point: myLatLng,
+                          radius: 40,
+                          useRadiusInMeter: false,
+                          color: const Color(0xFF2EC4B6).withValues(alpha: 0.15),
+                          borderColor: const Color(0xFF2EC4B6).withValues(alpha: 0.6),
+                          borderStrokeWidth: 1.5,
+                        ),
+                        // Partner live pulsing halo
+                        if (isPartnerLive)
+                          CircleMarker(
+                            point: partnerLatLng,
+                            radius: 50,
+                            useRadiusInMeter: false,
+                            color: AppColors.primary.withValues(alpha: 0.15),
+                            borderColor: AppColors.primary.withValues(alpha: 0.6),
+                            borderStrokeWidth: 1.5,
+                          ),
+                      ],
+                    ),
+
+                    // Connecting Line between Couple
+                    PolylineLayer(
+                      polylines: [
+                        Polyline(
+                          points: [myLatLng, partnerLatLng],
+                          strokeWidth: 3.5,
+                          color: AppColors.primary.withValues(alpha: 0.8),
+                          borderStrokeWidth: 1.5,
+                          borderColor: Colors.white.withValues(alpha: 0.8),
+                          strokeCap: StrokeCap.round,
                         ),
                       ],
                     ),
-                    child: Stack(
-                      children: [
-                        // Radar Background Animation
-                        AnimatedBuilder(
-                          animation: _radarController,
-                          builder: (context, _) {
-                            return CustomPaint(
-                              size: const Size(double.infinity, 290),
-                              painter: CoupleRadarPainter(
-                                progress: _radarController.value,
-                                isDark: isDark,
+
+                    // Custom Interactive Map Markers
+                    MarkerLayer(
+                      markers: [
+                        // Midpoint Distance Pill
+                        Marker(
+                          point: midPoint,
+                          width: 140,
+                          height: 38,
+                          child: Center(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: AppColors.primary,
+                                borderRadius: BorderRadius.circular(20),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withValues(alpha: 0.25),
+                                    blurRadius: 8,
+                                    offset: const Offset(0, 3),
+                                  ),
+                                ],
                               ),
-                            );
-                          },
-                        ),
-                        // User Avatar Pin
-                        Positioned(
-                          left: 45,
-                          bottom: 50,
-                          child: _buildPin(
-                            name: 'Kamu',
-                            photoUrl: user.photoUrl,
-                            isMe: true,
-                            isLive: isMyLiveActive,
-                            label: myLoc?.placeLabel ?? 'Di sini',
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.favorite_rounded, color: Colors.white, size: 13),
+                                  const SizedBox(width: 4),
+                                  Flexible(
+                                    child: Text(
+                                      distanceString,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 11,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
                           ),
                         ),
-                        // Partner Avatar Pin
-                        Positioned(
-                          right: 45,
-                          top: 45,
-                          child: _buildPin(
-                            name: partnerLoc?.displayName ?? 'Doi',
-                            photoUrl: partnerLoc?.photoUrl,
-                            isMe: false,
-                            isLive: isPartnerLive,
-                            label: partnerLoc?.placeLabel ?? 'Mencari...',
+
+                        // My Avatar Marker ("Kamu")
+                        Marker(
+                          point: myLatLng,
+                          width: 90,
+                          height: 105,
+                          child: GestureDetector(
+                            onTap: () => _centerOnLocation(myLatLng),
+                            child: _buildGoogleStyleMarker(
+                              name: 'Kamu',
+                              photoUrl: user.photoUrl,
+                              isMe: true,
+                              isLive: isMyLiveActive,
+                              statusText: myLoc?.placeLabel ?? _selectedStatus,
+                            ),
                           ),
                         ),
-                        // Distance Center Pill
-                        Center(
+
+                        // Partner Avatar Marker (Find Hub Style)
+                        Marker(
+                          point: partnerLatLng,
+                          width: 100,
+                          height: 115,
+                          child: GestureDetector(
+                            onTap: () {
+                              _centerOnLocation(partnerLatLng);
+                              setState(() => _isPanelExpanded = true);
+                            },
+                            child: AnimatedBuilder(
+                              animation: _pulseController,
+                              builder: (context, child) {
+                                return _buildGoogleStyleMarker(
+                                  name: partnerDisplayName,
+                                  photoUrl: partnerPhotoUrl,
+                                  isMe: false,
+                                  isLive: isPartnerLive,
+                                  batteryLevel: partnerBattery,
+                                  statusText: partnerPlace,
+                                  pulseValue: isPartnerLive ? _pulseController.value : 0.0,
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+
+              // 2. FLOATING TOP BAR (Google Maps / Find Hub Style)
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: SafeArea(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    child: Row(
+                      children: [
+                        // Back Button
+                        _buildGlassCircleButton(
+                          icon: Icons.arrow_back_ios_new_rounded,
+                          tooltip: 'Kembali',
+                          onTap: () => Navigator.of(context).maybePop(),
+                        ),
+                        const SizedBox(width: 10),
+
+                        // Title & Live Status Chip Pill
+                        Expanded(
                           child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                            height: 48,
+                            padding: const EdgeInsets.symmetric(horizontal: 14),
                             decoration: BoxDecoration(
-                              color: AppColors.primary,
-                              borderRadius: BorderRadius.circular(20),
+                              color: (isDark ? AppColors.surfaceDark : Colors.white).withValues(alpha: 0.9),
+                              borderRadius: BorderRadius.circular(24),
+                              border: Border.all(
+                                color: (isDark ? Colors.white12 : Colors.black12),
+                              ),
                               boxShadow: [
                                 BoxShadow(
-                                  color: AppColors.primary.withValues(alpha: 0.4),
-                                  blurRadius: 10,
+                                  color: Colors.black.withValues(alpha: 0.12),
+                                  blurRadius: 16,
                                   offset: const Offset(0, 4),
                                 ),
                               ],
                             ),
                             child: Row(
-                              mainAxisSize: MainAxisSize.min,
                               children: [
-                                const Icon(Icons.favorite_rounded, color: Colors.white, size: 14),
-                                const SizedBox(width: 6),
-                                Text(
-                                  (myLoc != null && partnerLoc != null)
-                                      ? myLoc.formattedDistanceTo(partnerLoc)
-                                      : 'Radar Aktif ✨',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 12,
+                                Container(
+                                  width: 10,
+                                  height: 10,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: (isMyLiveActive || isPartnerLive)
+                                        ? AppColors.success
+                                        : Colors.grey,
+                                    boxShadow: (isMyLiveActive || isPartnerLive)
+                                        ? [
+                                            BoxShadow(
+                                              color: AppColors.success.withValues(alpha: 0.6),
+                                              blurRadius: 6,
+                                              spreadRadius: 2,
+                                            )
+                                          ]
+                                        : null,
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        'Find Hub • Live Tracking',
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 13,
+                                          color: isDark ? AppColors.textPrimaryDark : AppColors.textPrimaryLight,
+                                        ),
+                                      ),
+                                      Text(
+                                        isMyLiveActive
+                                            ? '🟢 Live streaming aktif'
+                                            : '⚪ Berbagi lokasi standby',
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          color: isMyLiveActive ? AppColors.success : Colors.grey,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ],
                             ),
                           ),
+                        ),
+                        const SizedBox(width: 10),
+
+                        // Map Style Layer Switcher Popup
+                        PopupMenuButton<MapStyleType>(
+                          tooltip: 'Pilih Gaya Peta',
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                          icon: Container(
+                            width: 44,
+                            height: 44,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: (isDark ? AppColors.surfaceDark : Colors.white).withValues(alpha: 0.9),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.12),
+                                  blurRadius: 10,
+                                  offset: const Offset(0, 3),
+                                ),
+                              ],
+                            ),
+                            child: const Icon(Icons.layers_rounded, size: 20),
+                          ),
+                          onSelected: (style) {
+                            setState(() => _selectedMapStyle = style);
+                          },
+                          itemBuilder: (context) => [
+                            const PopupMenuItem(
+                              value: MapStyleType.voyager,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.map_rounded, size: 18, color: AppColors.primary),
+                                  SizedBox(width: 10),
+                                  Text('Google Clean (Default)'),
+                                ],
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              value: MapStyleType.dark,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.dark_mode_rounded, size: 18, color: Colors.indigoAccent),
+                                  SizedBox(width: 10),
+                                  Text('Night Mode (Dark)'),
+                                ],
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              value: MapStyleType.osm,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.public_rounded, size: 18, color: Colors.teal),
+                                  SizedBox(width: 10),
+                                  Text('OpenStreetMap'),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
                   ),
                 ),
-                const SizedBox(height: 10),
+              ),
 
-                // Partner Status Card
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  child: Card(
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              AppAvatar(
-                                photoUrl: partnerLoc?.photoUrl,
-                                name: partnerLoc?.displayName ?? 'D',
-                                radius: 24,
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Row(
-                                      children: [
-                                        Text(
-                                          partnerLoc?.displayName ?? 'Pasangan',
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 16,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 8),
-                                        if (isPartnerLive)
-                                          Container(
-                                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                            decoration: BoxDecoration(
-                                              color: AppColors.success,
-                                              borderRadius: BorderRadius.circular(10),
-                                            ),
-                                            child: const Text(
-                                              'LIVE',
-                                              style: TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 9,
-                                                fontWeight: FontWeight.bold,
-                                              ),
-                                            ),
-                                          ),
-                                      ],
-                                    ),
-                                    Text(
-                                      isPartnerLive
-                                          ? '🟢 Sedang berbagi live lokasi'
-                                          : (partnerLoc != null
-                                              ? 'Terakhir diperbarui ${DateFormat('HH:mm').format(partnerLoc.updatedAt)}'
-                                              : 'Belum memperbarui lokasi'),
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: isPartnerLive
-                                            ? AppColors.success
-                                            : (isDark
-                                                ? AppColors.textSecondaryDark
-                                                : AppColors.textSecondaryLight),
-                                        fontWeight: isPartnerLive ? FontWeight.bold : FontWeight.normal,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                decoration: BoxDecoration(
-                                  color: AppColors.success.withValues(alpha: 0.15),
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                child: Row(
-                                  children: [
-                                    const Icon(Icons.battery_charging_full_rounded,
-                                        size: 14, color: AppColors.success),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      '${partnerLoc?.batteryLevel ?? 88}%',
-                                      style: const TextStyle(
-                                        color: AppColors.success,
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                          Container(
+              // 3. FLOATING MAP ACTION BUTTONS (Right Side Google Maps Style)
+              Positioned(
+                right: 16,
+                top: 120,
+                child: Column(
+                  children: [
+                    // Recenter to Partner (Focus Doi)
+                    _buildFloatingMapButton(
+                      icon: Icons.favorite_rounded,
+                      iconColor: AppColors.primary,
+                      tooltip: 'Fokus ke Doi',
+                      onTap: () => _centerOnLocation(partnerLatLng, zoom: 16.5),
+                    ),
+                    const SizedBox(height: 10),
+
+                    // Recenter to Me (Focus Kamu)
+                    _buildFloatingMapButton(
+                      icon: Icons.my_location_rounded,
+                      iconColor: const Color(0xFF2EC4B6),
+                      tooltip: 'Fokus ke Saya',
+                      onTap: () => _centerOnLocation(myLatLng, zoom: 16.5),
+                    ),
+                    const SizedBox(height: 10),
+
+                    // Fit Both (Lihat Berdua)
+                    _buildFloatingMapButton(
+                      icon: Icons.zoom_out_map_rounded,
+                      iconColor: isDark ? Colors.white : Colors.black87,
+                      tooltip: 'Lihat Berdua di Peta',
+                      onTap: () => _fitBothLocations(myLatLng, partnerLatLng),
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Zoom In
+                    _buildFloatingMapButton(
+                      icon: Icons.add_rounded,
+                      tooltip: 'Perbesar',
+                      mini: true,
+                      onTap: () {
+                        try {
+                          _mapController.move(_mapController.camera.center, _mapController.camera.zoom + 1);
+                        } catch (_) {}
+                      },
+                    ),
+                    const SizedBox(height: 6),
+
+                    // Zoom Out
+                    _buildFloatingMapButton(
+                      icon: Icons.remove_rounded,
+                      tooltip: 'Perkecil',
+                      mini: true,
+                      onTap: () {
+                        try {
+                          _mapController.move(_mapController.camera.center, _mapController.camera.zoom - 1);
+                        } catch (_) {}
+                      },
+                    ),
+                  ],
+                ),
+              ),
+
+              // 4. BOTTOM FLOATING CARD / BOTTOM SHEET (Find Hub Style)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: SafeArea(
+                  top: false,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 300),
+                    curve: Curves.easeOutCubic,
+                    margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: isDark ? AppColors.surfaceDark : Colors.white,
+                      borderRadius: BorderRadius.circular(28),
+                      border: Border.all(
+                        color: isDark ? Colors.white12 : Colors.black.withValues(alpha: 0.08),
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.2),
+                          blurRadius: 28,
+                          offset: const Offset(0, -6),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Grabber Handle
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => setState(() => _isPanelExpanded = !_isPanelExpanded),
+                          child: Container(
                             width: double.infinity,
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                            decoration: BoxDecoration(
-                              color: isDark ? AppColors.surfaceSubtleDark : AppColors.surfaceSubtleLight,
-                              borderRadius: BorderRadius.circular(12),
+                            padding: const EdgeInsets.only(top: 10, bottom: 6),
+                            child: Center(
+                              child: Container(
+                                width: 42,
+                                height: 5,
+                                decoration: BoxDecoration(
+                                  color: Colors.grey.withValues(alpha: 0.4),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                              ),
                             ),
+                          ),
+                        ),
+
+                        // Partner Header Row (Tap to expand / collapse)
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => setState(() => _isPanelExpanded = !_isPanelExpanded),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
                             child: Row(
                               children: [
-                                const Icon(Icons.pin_drop_rounded, size: 18, color: AppColors.primary),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    partnerLoc?.placeLabel ?? 'Sedang santai di rumah 🏡',
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 13,
+                                // Avatar with Live Indicator
+                                Stack(
+                                  children: [
+                                    AppAvatar(
+                                      photoUrl: partnerPhotoUrl,
+                                      name: partnerDisplayName,
+                                      radius: 26,
                                     ),
+                                    Positioned(
+                                      bottom: 0,
+                                      right: 0,
+                                      child: Container(
+                                        padding: const EdgeInsets.all(3),
+                                        decoration: BoxDecoration(
+                                          color: isPartnerLive ? AppColors.success : Colors.grey,
+                                          shape: BoxShape.circle,
+                                          border: Border.all(color: Colors.white, width: 2),
+                                        ),
+                                        child: const Icon(Icons.favorite, size: 8, color: Colors.white),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(width: 14),
+
+                                // Name & Distance
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Text(
+                                            partnerDisplayName,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 16,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          if (isPartnerLive)
+                                            Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                              decoration: BoxDecoration(
+                                                color: AppColors.success,
+                                                borderRadius: BorderRadius.circular(10),
+                                              ),
+                                              child: const Text(
+                                                'LIVE',
+                                                style: TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 9,
+                                                  fontWeight: FontWeight.bold,
+                                                ),
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        '$distanceString • $partnerPlace',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
+                                        ),
+                                      ),
+                                      Text(
+                                        isPartnerLive
+                                            ? '🟢 Sedang berbagi live lokasi realtime'
+                                            : (partnerLoc != null
+                                                ? 'Terakhir diperbarui ${DateFormat('HH:mm').format(partnerLoc.updatedAt)}'
+                                                : 'Belum memperbarui lokasi hari ini'),
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: isPartnerLive ? AppColors.success : Colors.grey,
+                                          fontWeight: isPartnerLive ? FontWeight.w600 : FontWeight.normal,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+
+                                // Battery Badge
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.success.withValues(alpha: 0.12),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(Icons.battery_charging_full_rounded, size: 14, color: AppColors.success),
+                                      const SizedBox(width: 3),
+                                      Text(
+                                        '$partnerBattery%',
+                                        style: const TextStyle(
+                                          color: AppColors.success,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 4),
+                                Icon(
+                                  _isPanelExpanded ? Icons.keyboard_arrow_down_rounded : Icons.keyboard_arrow_up_rounded,
+                                  color: Colors.grey,
+                                  size: 20,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+
+                        // Expandable Controls Section
+                        if (_isPanelExpanded) ...[
+                          const SizedBox(height: 10),
+
+                          // 1-TAP LIVE SHARING MASTER TOGGLE
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  colors: isMyLiveActive
+                                      ? [
+                                          const Color(0xFF163E2B),
+                                          isDark ? AppColors.surfaceDark : const Color(0xFFE8F7EE)
+                                        ]
+                                      : [
+                                          isDark ? AppColors.surfaceSubtleDark : AppColors.surfaceSubtleLight,
+                                          isDark ? AppColors.surfaceDark : AppColors.surfaceLight,
+                                        ],
+                                  begin: Alignment.topLeft,
+                                  end: Alignment.bottomRight,
+                                ),
+                                borderRadius: BorderRadius.circular(18),
+                                border: Border.all(
+                                  color: isMyLiveActive ? AppColors.success : Colors.transparent,
+                                  width: 1.5,
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    isMyLiveActive ? Icons.sensors_rounded : Icons.sensors_off_rounded,
+                                    color: isMyLiveActive ? AppColors.success : Colors.grey,
+                                    size: 22,
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'Bagikan Live Lokasi Saya',
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 13,
+                                            color: isDark ? AppColors.textPrimaryDark : AppColors.textPrimaryLight,
+                                          ),
+                                        ),
+                                        Text(
+                                          isMyLiveActive
+                                              ? 'GPS streaming live aktif otomatis'
+                                              : 'Nyalakan agar pasangan bisa tracking kamu',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  Switch.adaptive(
+                                    value: isMyLiveActive,
+                                    activeTrackColor: AppColors.success,
+                                    onChanged: (val) => _toggleLiveSharing(val),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+
+                          // Quick Action Row (Find Hub / Google Maps Style)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: Row(
+                              children: [
+                                // Google Maps Route Navigation
+                                Expanded(
+                                  child: ElevatedButton.icon(
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: AppColors.primary,
+                                      foregroundColor: Colors.white,
+                                      padding: const EdgeInsets.symmetric(vertical: 12),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                                      elevation: 2,
+                                    ),
+                                    onPressed: () => _openNavigation(partnerLatLng.latitude, partnerLatLng.longitude),
+                                    icon: const Icon(Icons.directions_car_rounded, size: 18),
+                                    label: const Text(
+                                      'Petunjuk Arah',
+                                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+
+                                // Ping Partner Notification
+                                Container(
+                                  decoration: BoxDecoration(
+                                    color: isDark ? AppColors.surfaceSubtleDark : AppColors.surfaceSubtleLight,
+                                    borderRadius: BorderRadius.circular(14),
+                                  ),
+                                  child: IconButton(
+                                    tooltip: 'Ping Doi',
+                                    icon: const Icon(Icons.notifications_active_outlined, color: AppColors.primary),
+                                    onPressed: _pingPartnerForLocation,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+
+                                // Share Snapshot to Chat
+                                Container(
+                                  decoration: BoxDecoration(
+                                    color: isDark ? AppColors.surfaceSubtleDark : AppColors.surfaceSubtleLight,
+                                    borderRadius: BorderRadius.circular(14),
+                                  ),
+                                  child: IconButton(
+                                    tooltip: 'Bagi ke Chat',
+                                    icon: const Icon(Icons.chat_bubble_outline_rounded, color: AppColors.primary),
+                                    onPressed: () {
+                                      if (myLoc != null) {
+                                        _shareToChat(myLoc);
+                                      } else {
+                                        repo
+                                            .updateLocation(
+                                          coupleId: coupleId,
+                                          uid: user.uid,
+                                          displayName: user.displayName,
+                                          photoUrl: user.photoUrl,
+                                          placeLabel: _selectedStatus,
+                                        )
+                                            .then((updated) {
+                                          if (updated != null) _shareToChat(updated);
+                                        });
+                                      }
+                                    },
                                   ),
                                 ),
                               ],
                             ),
                           ),
+                          const SizedBox(height: 12),
+
+                          // Activity Status Selector Chips
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: SizedBox(
+                              height: 34,
+                              child: ListView.separated(
+                                scrollDirection: Axis.horizontal,
+                                itemCount: _statusOptions.length,
+                                separatorBuilder: (_, _) => const SizedBox(width: 6),
+                                itemBuilder: (context, idx) {
+                                  final status = _statusOptions[idx];
+                                  final isSelected = _selectedStatus == status;
+                                  return ChoiceChip(
+                                    label: Text(status),
+                                    selected: isSelected,
+                                    selectedColor: AppColors.primaryLight,
+                                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                                    labelStyle: TextStyle(
+                                      color: isSelected ? AppColors.primary : null,
+                                      fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                                      fontSize: 11,
+                                    ),
+                                    onSelected: (val) {
+                                      if (val) {
+                                        setState(() => _selectedStatus = status);
+                                        if (isMyLiveActive) {
+                                          repo.updateLocation(
+                                            coupleId: coupleId,
+                                            uid: user.uid,
+                                            displayName: user.displayName,
+                                            photoUrl: user.photoUrl,
+                                            placeLabel: status,
+                                            isLive: true,
+                                          );
+                                        }
+                                      }
+                                    },
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
                         ],
-                      ),
+                      ],
                     ),
                   ),
                 ),
-                const SizedBox(height: 12),
-
-                // Status Activity Selector
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Status Aktivitas Kamu',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                          color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: _statusOptions.map((status) {
-                          final isSelected = _selectedStatus == status;
-                          return ChoiceChip(
-                            label: Text(status),
-                            selected: isSelected,
-                            selectedColor: AppColors.primaryLight,
-                            labelStyle: TextStyle(
-                              color: isSelected ? AppColors.primary : null,
-                              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                              fontSize: 12,
-                            ),
-                            onSelected: (val) {
-                              if (val) {
-                                setState(() => _selectedStatus = status);
-                                if (isMyLiveActive) {
-                                  repo.updateLocation(
-                                    coupleId: coupleId,
-                                    uid: user.uid,
-                                    displayName: user.displayName,
-                                    photoUrl: user.photoUrl,
-                                    placeLabel: status,
-                                    isLive: true,
-                                  );
-                                }
-                              }
-                            },
-                          );
-                        }).toList(),
-                      ),
-                      const SizedBox(height: 14),
-
-                      // Quick Action: Share to chat
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton.icon(
-                          style: OutlinedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                          ),
-                          onPressed: () {
-                            if (myLoc != null) {
-                              _shareToChat(myLoc);
-                            } else {
-                              repo
-                                  .updateLocation(
-                                coupleId: coupleId,
-                                uid: user.uid,
-                                displayName: user.displayName,
-                                photoUrl: user.photoUrl,
-                                placeLabel: _selectedStatus,
-                              )
-                                  .then((updated) {
-                                if (updated != null) _shareToChat(updated);
-                              });
-                            }
-                          },
-                          icon: const Icon(Icons.share_location_rounded, size: 18),
-                          label: const Text('Bagi Lokasi Saat Ini ke Chat'),
-                        ),
-                      ),
-                      const SizedBox(height: 24),
-                    ],
-                  ),
-                ),
-              ],
-            ),
+              ),
+            ],
           );
         },
       ),
     );
   }
 
-  Widget _buildPin({
+  /// Glassmorphic circular button for top bar
+  Widget _buildGlassCircleButton({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onTap,
+  }) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Tooltip(
+      message: tooltip,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: (isDark ? AppColors.surfaceDark : Colors.white).withValues(alpha: 0.9),
+            border: Border.all(color: isDark ? Colors.white12 : Colors.black12),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.12),
+                blurRadius: 10,
+                offset: const Offset(0, 3),
+              ),
+            ],
+          ),
+          child: Icon(icon, size: 20),
+        ),
+      ),
+    );
+  }
+
+  /// Floating map tool buttons on the right side
+  Widget _buildFloatingMapButton({
+    required IconData icon,
+    Color? iconColor,
+    required String tooltip,
+    required VoidCallback onTap,
+    bool mini = false,
+  }) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final size = mini ? 38.0 : 44.0;
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: (isDark ? AppColors.surfaceDark : Colors.white).withValues(alpha: 0.95),
+        shape: const CircleBorder(),
+        elevation: 4,
+        shadowColor: Colors.black38,
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: SizedBox(
+            width: size,
+            height: size,
+            child: Icon(icon, size: mini ? 18 : 22, color: iconColor),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Google Maps / Find Hub Pin with Avatar, Pulsing Halo & Battery Badge
+  Widget _buildGoogleStyleMarker({
     required String name,
     required String? photoUrl,
     required bool isMe,
     required bool isLive,
-    required String label,
+    int? batteryLevel,
+    required String statusText,
+    double pulseValue = 0.0,
   }) {
+    final mainColor = isMe ? const Color(0xFF2EC4B6) : AppColors.primary;
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         Stack(
           alignment: Alignment.center,
+          clipBehavior: Clip.none,
           children: [
-            if (isLive)
-              Container(
-                width: 68,
-                height: 68,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: (isMe ? const Color(0xFF2EC4B6) : AppColors.primary)
-                      .withValues(alpha: 0.25),
+            // Pulsing live beacon wave
+            if (isLive && pulseValue > 0.0)
+              Transform.scale(
+                scale: 1.0 + (pulseValue * 0.45),
+                child: Container(
+                  width: 60,
+                  height: 60,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: mainColor.withValues(alpha: (1.0 - pulseValue) * 0.4),
+                  ),
                 ),
               ),
+
+            // Drop pin wrapper
             Container(
-              width: 58,
-              height: 58,
+              width: 52,
+              height: 52,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
+                color: Colors.white,
                 border: Border.all(
-                  color: isLive ? AppColors.success : (isMe ? Colors.white : AppColors.primary),
-                  width: 3,
+                  color: isLive ? AppColors.success : mainColor,
+                  width: 3.5,
                 ),
                 boxShadow: [
                   BoxShadow(
-                    color: (isMe ? Colors.black : AppColors.primary).withValues(alpha: 0.25),
+                    color: Colors.black.withValues(alpha: 0.28),
                     blurRadius: 10,
                     offset: const Offset(0, 4),
                   ),
@@ -662,53 +1154,77 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
                 child: photoUrl != null && photoUrl.isNotEmpty
                     ? AppImageView(imageUrl: photoUrl, fit: BoxFit.cover)
                     : Container(
-                        color: isMe ? AppColors.surfaceSubtleDark : AppColors.primaryLight,
+                        color: isMe ? const Color(0xFF2EC4B6) : AppColors.primaryLight,
                         child: Center(
                           child: Text(
                             name.isNotEmpty ? name[0].toUpperCase() : '?',
                             style: TextStyle(
                               color: isMe ? Colors.white : AppColors.primary,
                               fontWeight: FontWeight.bold,
-                              fontSize: 20,
+                              fontSize: 18,
                             ),
                           ),
                         ),
                       ),
               ),
             ),
+
+            // Battery Badge (top right of avatar)
+            if (batteryLevel != null)
+              Positioned(
+                top: -4,
+                right: -6,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: AppColors.success,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.white, width: 1.5),
+                  ),
+                  child: Text(
+                    '$batteryLevel%',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 8,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+
+            // Bottom pin pointer triangle
             Positioned(
-              bottom: 0,
-              right: 0,
-              child: Container(
-                padding: const EdgeInsets.all(4),
-                decoration: BoxDecoration(
-                  color: isLive
-                      ? AppColors.success
-                      : (isMe ? const Color(0xFF2EC4B6) : AppColors.primary),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(
-                  isLive ? Icons.sensors_rounded : Icons.favorite,
-                  size: 10,
-                  color: Colors.white,
-                ),
+              bottom: -5,
+              child: CustomPaint(
+                size: const Size(10, 6),
+                painter: _PinTrianglePainter(color: isLive ? AppColors.success : mainColor),
               ),
             ),
           ],
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: 7),
+
+        // Name & Status Pill
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
           decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.65),
-            borderRadius: BorderRadius.circular(10),
+            color: Colors.black.withValues(alpha: 0.75),
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.2),
+                blurRadius: 4,
+              ),
+            ],
           ),
           child: Text(
-            isLive ? '🟢 $label' : label,
+            isLive ? '🟢 $name' : name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: const TextStyle(
               color: Colors.white,
               fontSize: 10,
-              fontWeight: FontWeight.w600,
+              fontWeight: FontWeight.bold,
             ),
           ),
         ),
@@ -717,46 +1233,25 @@ class _LocationTrackingScreenState extends ConsumerState<LocationTrackingScreen>
   }
 }
 
-class CoupleRadarPainter extends CustomPainter {
-  final double progress;
-  final bool isDark;
-
-  CoupleRadarPainter({required this.progress, required this.isDark});
+class _PinTrianglePainter extends CustomPainter {
+  final Color color;
+  _PinTrianglePainter({required this.color});
 
   @override
   void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final maxRadius = math.min(size.width, size.height) * 0.45;
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
 
-    final gridPaint = Paint()
-      ..color = (isDark ? Colors.white : AppColors.primary).withValues(alpha: 0.08)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.0;
+    final path = Path()
+      ..moveTo(0, 0)
+      ..lineTo(size.width / 2, size.height)
+      ..lineTo(size.width, 0)
+      ..close();
 
-    for (int i = 1; i <= 3; i++) {
-      final r = maxRadius * (i / 3.0);
-      canvas.drawCircle(center, r, gridPaint);
-    }
-
-    canvas.drawLine(
-      Offset(center.dx - maxRadius, center.dy),
-      Offset(center.dx + maxRadius, center.dy),
-      gridPaint,
-    );
-    canvas.drawLine(
-      Offset(center.dx, center.dy - maxRadius),
-      Offset(center.dx, center.dy + maxRadius),
-      gridPaint,
-    );
-
-    final waveRadius = maxRadius * progress;
-    final wavePaint = Paint()
-      ..color = AppColors.primary.withValues(alpha: (1.0 - progress) * 0.35)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.0;
-    canvas.drawCircle(center, waveRadius, wavePaint);
+    canvas.drawPath(path, paint);
   }
 
   @override
-  bool shouldRepaint(covariant CoupleRadarPainter oldDelegate) => true;
+  bool shouldRepaint(covariant _PinTrianglePainter oldDelegate) => oldDelegate.color != color;
 }
